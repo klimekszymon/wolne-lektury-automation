@@ -1,0 +1,526 @@
+{
+  "name": "WL Bulk Importer - DONE",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "b47e45be-58ef-480d-9b6f-68190827489b",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2432,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://wolnelektury.pl/api/authors/",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "page_size",
+              "value": "10"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "40c00af2-de39-4d2d-bee6-dc5f5dbe4f77",
+      "name": "Fetch WL Authors List",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2208,
+        448
+      ],
+      "notes": "Pobiera listę autorów z Wolnych Lektur. Zmień page_size na 100-500 dla pełnego importu."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse authors list - n8n already split into items\nconst items = $input.all();\nconsole.log(`Processing ${items.length} authors from WL API`);\n\nreturn items.map(item => ({\n  json: {\n    name: item.json.name,\n    slug: item.json.slug,\n    detailUrl: item.json.href,\n    catalogUrl: item.json.url\n  }\n}));"
+      },
+      "id": "92b00733-5b5b-4870-a7a1-2b18f3de8736",
+      "name": "Parse Authors List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1984,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.detailUrl }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "9286cfbb-d3e4-4105-9e72-c9584404d697",
+      "name": "Fetch Author Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1760,
+        448
+      ],
+      "notes": "N8N automatycznie wykonuje dla każdego autora!"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract death year from HTML description - PRESERVE ORIGINAL METADATA FOR AI BRANCH\nconst items = $input.all();  // get all incoming items\nconst results = [];\n\nconsole.log(`\\n=== PROCESSING ${items.length} AUTHORS (with original metadata preserved) ===`);\n\nfor (const item of items) {\n  const data = item.json;\n\n  // Preserve original metadata in a single property so it survives through AI node\n  const original = {\n    name: data.name || data.Autor || '',\n    slug: data.slug || data.WL_slug || '',\n    description: data.description || '',\n    catalogUrl: data.catalogUrl || data.WL_url || data.url || '',\n    birthYear: data.birthYear || null,\n    deathYear: data.deathYear || null,\n    extractionMethod: data.extractionMethod || null,\n    needsAI: data.needsAI || false\n  };\n\n  const name = original.name;\n  const description = original.description || '';\n\n  let deathYear = null;\n  let birthYear = original.birthYear || null;\n  let extractionMethod = 'none';\n\n  // METHOD 1: Structured HTML <dt>Zm.</dt>\n  const deathMatch = description.match(/<dt>Zm\\.<\\/dt>\\s*<dd>[^<]*?(\\d{4})/i);\n  if (deathMatch) {\n    deathYear = parseInt(deathMatch[1]);\n    extractionMethod = 'structured_html';\n  }\n\n  // METHOD 2: Regex patterns fallback\n  if (!deathYear) {\n    const patterns = [\n      /zm\\.?\\s*(\\d{1,2})\\s*\\w+\\s*(\\d{4})/i,\n      /zmarł.*?(\\d{4})/i,\n      /\\((\\d{4})\\s*[-–]\\s*(\\d{4})\\)/,\n      /ur\\..*?(\\d{4}).*?zm\\..*?(\\d{4})/i,\n      /zm\\.\\s*(\\d{4})/i,\n      /†\\s*(\\d{4})/,\n      /died.*?(\\d{4})/i\n    ];\n\n    for (const pattern of patterns) {\n      const match = description.match(pattern);\n      if (match) {\n        deathYear = parseInt(match[match.length - 1]);\n        extractionMethod = 'regex_pattern';\n        break;\n      }\n    }\n  }\n\n  // Extract birth year\n  const birthMatch = description.match(/<dt>Ur\\.<\\/dt>\\s*<dd>[^<]*?(\\d{4})/i);\n  if (birthMatch) {\n    birthYear = parseInt(birthMatch[1]);\n  }\n\n  // Validate death year\n  const currentYear = new Date().getFullYear();\n  if (deathYear && (deathYear < 1500 || deathYear > currentYear)) {\n    console.log(`⚠️ Invalid death year for ${name}: ${deathYear}`);\n    deathYear = null;\n    extractionMethod = 'invalid';\n  }\n\n  if (deathYear && birthYear && deathYear < birthYear) {\n    console.log(`⚠️ Death before birth for ${name}: ${birthYear}-${deathYear}`);\n    deathYear = null;\n    extractionMethod = 'invalid_order';\n  }\n\n  const needsAI = !deathYear && description.length > 100;\n\n  if (deathYear) {\n    console.log(`✓ ${name}: †${deathYear} (${extractionMethod})`);\n  } else if (needsAI) {\n    console.log(`? ${name}: Needs AI`);\n  } else {\n    console.log(`✗ ${name}: No data`);\n  }\n\n  // Always include 'original' object so downstream (AI) responses can be re-associated\n  results.push({\n    json: {\n      original,\n      name: original.name,\n      slug: original.slug,\n      deathYear,\n      birthYear,\n      extractionMethod,\n      needsAI,\n      description: description.substring(0, 1000),\n      descriptionLength: description.length,\n      catalogUrl: original.catalogUrl\n    }\n  });\n}\n\nconsole.log(`\\n=== EXTRACTION COMPLETE ===`);\nconsole.log(`Processed: ${results.length} authors`);\nconsole.log(`With death year: ${results.filter(r => r.json.deathYear).length}`);\nconsole.log(`Need AI: ${results.filter(r => r.json.needsAI).length}`);\n\nreturn results;"
+      },
+      "id": "129006d8-428d-42cc-ad71-378c232c1077",
+      "name": "Extract Death Year (Regex)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1552,
+        448
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "db2fd28b-6682-436e-a290-c127ca054f98",
+              "leftValue": "=={{ $json.needsAI === true }}",
+              "rightValue": "=true",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ee5a0d08-da2c-48d8-a972-63f8db0fa4b1",
+      "name": "Route: Needs AI?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1328,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "Wyciągnij TYLKO rok śmierci autora z poniższego tekstu biograficznego.\n\nAutor: {{ $json.original.name }}\n\nBiografia:\n{{ $json.description }}\n\nOdpowiedz TYLKO liczbą (rok śmierci) lub słowem \"UNKNOWN\" jeśli nie możesz znaleźć.\n\nPrzykłady poprawnych odpowiedzi:\n- 1849\n- 1953\n- UNKNOWN\n\nTwoja odpowiedź:"
+            }
+          ]
+        },
+        "options": {
+          "maxTokens": 20,
+          "temperature": 0.1
+        }
+      },
+      "id": "b0b63e94-e95a-4d32-9f2d-4ee4abb2008c",
+      "name": "AI: Extract Death Year",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.4,
+      "position": [
+        -1200,
+        288
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "D2daxxJGBlbkhf1p",
+          "name": "OpenAi account"
+        }
+      },
+      "notes": "Opcjonalne - wymaga OpenAI API key"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AI response - Robust: preserve/reconstruct author metadata\nconst items = $input.all();\nconst results = [];\n\nconsole.log(`\\n=== PARSING ${items.length} AI RESPONSES ===`);\n\nfor (const item of items) {\n  // AI node can return different shapes. Try common places for text:\n  const aiResponse = (\n    (item.json.message && (item.json.message.content || item.json.message)) ||\n    item.json.text ||\n    item.json.content ||\n    item.json.aiResponse ||\n    ''\n  );\n\n  const aiText = (typeof aiResponse === 'string') ? aiResponse.trim() : (aiResponse?.toString() || '').trim();\n\n  // Reconstruct metadata: prefer item.json.original, else fallback to fields on item.json (if upstream preserved), else try $input.all()[0] etc.\n  const meta = item.json.original || {\n    name: item.json.name || item.json.Autor || '',\n    slug: item.json.slug || item.json.WL_slug || '',\n    catalogUrl: item.json.catalogUrl || item.json.WL_url || item.json.url || '',\n    birthYear: item.json.birthYear || item.json.Rok_urodzenia || null,\n    deathYear: item.json.deathYear || item.json.Rok_smierci || null,\n    extractionMethod: item.json.extractionMethod || null,\n    description: item.json.description || ''\n  };\n\n  let deathYear = meta.deathYear;\n  let extractionMethod = meta.extractionMethod || null;\n  const name = meta.name || 'UNKNOWN';\n  const currentYear = new Date().getFullYear();\n\n  console.log(`Processing AI response for ${name}: \"${aiText}\"`);\n\n  const yearMatch = aiText.match(/\\d{4}/);\n  if (yearMatch) {\n    const aiYear = parseInt(yearMatch[0]);\n    if (aiYear >= 1500 && aiYear <= currentYear) {\n      deathYear = aiYear;\n      extractionMethod = 'openai';\n      console.log(`✓ AI extracted: ${aiYear} for ${name}`);\n    } else {\n      console.log(`⚠️ AI returned invalid year: ${aiYear} for ${name}`);\n    }\n  } else if (aiText.toUpperCase().includes('UNKNOWN')) {\n    extractionMethod = 'ai_unknown';\n    console.log(`✗ AI couldn't find death year for ${name}`);\n  } else {\n    console.log(`⚠️ Unexpected AI response for ${name}: \"${aiText}\"`);\n  }\n\n  results.push({\n    json: {\n      // keep original metadata fields on top-level so downstream nodes see consistent keys\n      Autor: meta.name || '',\n      name: meta.name || '',\n      slug: meta.slug || '',\n      WL_slug: meta.slug || '',\n      WL_url: meta.catalogUrl || '',\n      catalogUrl: meta.catalogUrl || '',\n      birthYear: meta.birthYear || '',\n      Rok_urodzenia: meta.birthYear || '',\n      deathYear,\n      Rok_smierci: deathYear || '',\n      extractionMethod,\n      aiResponse: aiText,\n      description: meta.description || '',\n      needsAI: item.json.needsAI || false\n    }\n  });\n}\n\nconsole.log(`\\n=== AI PARSING COMPLETE ===`);\nconsole.log(`Processed: ${results.length} items`);\nconsole.log(`Successfully extracted: ${results.filter(r => r.json.extractionMethod === 'openai').length}`);\n\nreturn results;"
+      },
+      "id": "62d63f29-2934-4bed-84e7-e17b7a63facb",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -816,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "mergeByFields": {
+          "values": [
+            {
+              "field1": "={{ $json.original.deathYear }}",
+              "field2": "={{ $json.deathYear }}"
+            }
+          ]
+        },
+        "joinMode": "keepEverything",
+        "options": {}
+      },
+      "id": "2a84be3f-3ebe-4616-a0d5-613b8630ae45",
+      "name": "Merge AI and Non-AI",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        -1008,
+        640
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter only public domain authors - produce consistent Polish fields\nconst currentYear = new Date().getFullYear();\nconst items = $input.all();\n\nconsole.log(`\\n=== FILTERING PUBLIC DOMAIN ===`);\nconsole.log(`Input items: ${items.length}`);\n\nconst results = [];\nconst rejected = [];\n\nfor (const item of items) {\n  // accept both shapes (from non-AI branch and AI branch)\n  const name = item.json.Autor || item.json.name || '';\n  const deathYear = item.json.Rok_smierci || item.json.deathYear || null;\n  const birthYear = item.json.Rok_urodzenia || item.json.birthYear || '';\n  const slug = item.json.WL_slug || item.json.slug || '';\n  const catalogUrl = item.json.WL_url || item.json.catalogUrl || '';\n  const extractionMethod = item.json.extractionMethod || item.json.extractionMethod || 'unknown';\n\n  if (!deathYear) {\n    rejected.push({ name, reason: 'No death year found' });\n    continue;\n  }\n\n  const yearsSinceDeath = currentYear - Number(deathYear);\n  const isPublicDomain = yearsSinceDeath > 70;\n\n  if (isPublicDomain) {\n    results.push({\n      json: {\n        Autor: name,\n        Rok_smierci: Number(deathYear),\n        Rok_urodzenia: birthYear || '',\n        Tlumacz: '',\n        Rok_smierci_tlumacza: '',\n        Zrodlo: `Wolne Lektury (${extractionMethod})`,\n        WL_url: catalogUrl || '',\n        WL_slug: slug || '',\n        Data_importu: new Date().toISOString().split('T')[0]\n      }\n    });\n    console.log(`✓ ${name} (†${deathYear}) - ${yearsSinceDeath} years since death`);\n  } else {\n    rejected.push({\n      name,\n      deathYear,\n      reason: `Protected - only ${yearsSinceDeath} years since death (need 70+)`\n    });\n    console.log(`✗ ${name} (†${deathYear}) - protected (${70 - yearsSinceDeath} years to public domain)`);\n  }\n}\n\nconsole.log(`\\n=== RESULTS ===`);\nconsole.log(`✓ Public domain: ${results.length}`);\nconsole.log(`✗ Rejected: ${rejected.length}`);\n\nif (rejected.length > 0) {\n  console.log(`\\nRejected authors:`);\n  rejected.forEach(r => console.log(`  - ${r.name}: ${r.reason}`));\n}\n\nif (results.length === 0) {\n  console.log(`\\n⚠️ WARNING: No public domain authors found!`);\n  return [{ json: { error: true, message: 'No authors passed filter' } }];\n}\n\nreturn results;"
+      },
+      "id": "47cbe960-a4a9-42a7-96fd-d59d9f4006b4",
+      "name": "Filter Public Domain (>70 years)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -672,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1KDw3BCqtMzLyjVUUIexzo8tK9yApuu4EzS1BpuaVpBk",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Autorzy",
+          "mode": "name",
+          "cachedResultName": "Autorzy"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Autor": "={{ $json.Autor }}",
+            "Rok_smierci": "={{ $json.Rok_smierci }}",
+            "Tlumacz": "={{ $json.Tlumacz }}",
+            "Rok_smierci_tlumacza": "={{ $json.Rok_smierci_tlumacza }}",
+            "Zrodlo": "={{ $json.Zrodlo }}",
+            "WL_url": "={{ $json.WL_url }}",
+            "WL_slug": "={{ $json.WL_slug }}",
+            "Data_importu": "={{ $json.Data_importu }}"
+          },
+          "matchingColumns": [
+            "Autor"
+          ],
+          "schema": [
+            {
+              "id": "Autor",
+              "displayName": "Autor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Rok_smierci",
+              "displayName": "Rok_smierci",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Tlumacz",
+              "displayName": "Tlumacz",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Rok_smierci_tlumacza",
+              "displayName": "Rok_smierci_tlumacza",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Zrodlo",
+              "displayName": "Zrodlo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status_AUTO",
+              "displayName": "Status_AUTO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Lat_do_domeny",
+              "displayName": "Lat_do_domeny",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Ostatnie_sprawdzenie",
+              "displayName": "Ostatnie_sprawdzenie",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Confidence",
+              "displayName": "Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Komentarz",
+              "displayName": "Komentarz",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "WL_url",
+              "displayName": "WL_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false,
+          "matchColumns": [
+            "Autor"
+          ]
+        },
+        "options": {}
+      },
+      "id": "2f3b7403-d3ff-4bc9-9217-7344309193fb",
+      "name": "Upsert to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [
+        -432,
+        448
+      ],
+      "credentials": {
+        "googleApi": {
+          "id": "1J8dshOwpMPr0t7a",
+          "name": "Google Service Account account"
+        }
+      },
+      "notes": "Używa appendOrUpdate - automatycznie unika duplikatów!"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build summary\nconst items = $input.all();\nconst count = items.length;\n\nif (count === 0) {\n  return [{\n    json: {\n      message: '⚠️ No authors imported - all were duplicates or filtered out',\n      count: 0,\n      timestamp: new Date().toISOString()\n    }\n  }];\n}\n\n// Group by extraction method\nconst byMethod = {};\nitems.forEach(item => {\n  const source = item.json.Zrodlo || 'unknown';\n  const method = source.match(/\\(([^)]+)\\)/)?.[1] || 'unknown';\n  byMethod[method] = (byMethod[method] || 0) + 1;\n});\n\nconst methodStats = Object.entries(byMethod)\n  .map(([method, count]) => `  • ${method}: ${count}`)\n  .join('\\n');\n\n// Sample authors\nconst sampleAuthors = items\n  .slice(0, 10)\n  .map(i => `  • ${i.json.Autor} (†${i.json.Rok_smierci})`)\n  .join('\\n');\n\nconst message = `📚 **Wolne Lektury Import - COMPLETE** ✅\\n\\n` +\n                `**Zaimportowano:** ${count} autorów (domena publiczna)\\n` +\n                `**Data:** ${new Date().toLocaleString('pl-PL')}\\n\\n` +\n                `**Metody ekstrakcji:**\\n${methodStats}\\n\\n` +\n                `**Przykładowi autorzy:**\\n${sampleAuthors}` +\n                (count > 10 ? `\\n  ... i ${count - 10} więcej` : '') +\n                `\\n\\n🎉 Autorzy dodani do Google Sheet!`;\n\nconsole.log('\\n' + message);\n\nreturn [{\n  json: {\n    message,\n    count,\n    byMethod,\n    timestamp: new Date().toISOString(),\n    success: true\n  }\n}];"
+      },
+      "id": "13b7db03-0c31-4496-80fd-1dc668718d1e",
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        448
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch WL Authors List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch WL Authors List": {
+      "main": [
+        [
+          {
+            "node": "Parse Authors List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Authors List": {
+      "main": [
+        [
+          {
+            "node": "Fetch Author Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Author Details": {
+      "main": [
+        [
+          {
+            "node": "Extract Death Year (Regex)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Death Year (Regex)": {
+      "main": [
+        [
+          {
+            "node": "Route: Needs AI?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: Needs AI?": {
+      "main": [
+        [
+          {
+            "node": "AI: Extract Death Year",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge AI and Non-AI",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "AI: Extract Death Year": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [
+          {
+            "node": "Merge AI and Non-AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge AI and Non-AI": {
+      "main": [
+        [
+          {
+            "node": "Filter Public Domain (>70 years)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Public Domain (>70 years)": {
+      "main": [
+        [
+          {
+            "node": "Upsert to Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert to Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Build Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "34d4676d-817a-4420-a312-85ae5b30e303",
+  "meta": {
+    "instanceId": "1706d7bc0db6ffcce50f5398cde37175c78fc7c34eef095b7fbbc7db14473a06"
+  },
+  "id": "ayNB3qqnhft12Tpo",
+  "tags": [
+    {
+      "updatedAt": "2025-10-31T23:11:04.445Z",
+      "createdAt": "2025-10-31T23:11:04.445Z",
+      "id": "TAuLCpqJevdkcIVm",
+      "name": "sheet"
+    }
+  ]
+}
