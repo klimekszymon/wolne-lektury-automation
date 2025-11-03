@@ -1,0 +1,32 @@
+📊 WOLNE LEKTURY - DASHBOARD,,,,⭐ TOP 10 AUTORÓW DO NAGRANIA,,,
+Ostatnia aktualizacja:,=TEXT(NOW(),"DD/MM/YYYY HH:MM"),,,,,,
+,,,Autor,Priorytet,Utworów,Status
+,,,=QUERY(AUTORZY!A:Z,"SELECT A, T, Q, Z WHERE M = 'TAK ✅' ORDER BY T DESC LIMIT 10",0),,,
+📚 STATYSTYKI AUTORÓW,,,,,,
+,,,,,,,
+Łącznie autorów:,=COUNTA(AUTORZY!A:A)-1,,,,,,
+✅ W domenie publicznej:,=COUNTIF(AUTORZY!I:I,"✅*"),,,,,,
+❌ Chronione:,=COUNTIF(AUTORZY!I:I,"❌*"),,,,,,
+⚠️ Wymaga weryfikacji:,=COUNTIF(AUTORZY!I:I,"⚠️*"),,,,,,
+,,,,,,,
+📊 % możliwych do nagrania:,=TEXT(COUNTIF(AUTORZY!M:M,"TAK*")/(COUNTA(AUTORZY!M:M)-1),"0%"),,,👶 GRUPY WIEKOWE,,
+,,,,,,,
+📝 STATUS PRODUKCJI,,,,2-8 lat:,=COUNTIF(AUTORZY!S:S,"*2-8*"),
+,,,,,,,
+📝 Do nagrania:,=COUNTIF(AUTORZY!Z:Z,"📝*"),,,,3-10 lat:,=COUNTIF(AUTORZY!S:S,"*3-10*")
+🎙️ W trakcie:,=COUNTIF(AUTORZY!Z:Z,"🎙️*"),,,,4-9 lat:,=COUNTIF(AUTORZY!S:S,"*4-9*")
+✅ Gotowe:,=COUNTIF(AUTORZY!Z:Z,"✅*"),,,,5-12 lat:,=COUNTIF(AUTORZY!S:S,"*5-12*")
+📅 Zaplanowane:,=COUNTIF(AUTORZY!Z:Z,"📅*"),,,,8-12 lat:,=COUNTIF(AUTORZY!S:S,"*8-12*")
+⏸️ Wstrzymane:,=COUNTIF(AUTORZY!Z:Z,"⏸️*"),,,,,,
+,,,,,,,
+📊 % ukończenia:,=TEXT(COUNTIF(AUTORZY!Z:Z,"✅*")/(COUNTA(AUTORZY!Z:Z)-1),"0%"),,,🆕 OSTATNIO DODANI,,,
+,,,,,,,
+📚 ROZKŁAD KATEGORII,,,,Autor,Status,Kategoria,Data
+,,,,,=QUERY(AUTORZY!A:Z,"SELECT A, I, R, V ORDER BY V DESC LIMIT 10",0),,
+📝 Wiersz:,=COUNTIF(AUTORZY!R:R,"*Wiersz*"),,,,,,
+📖 Opowieść:,=COUNTIF(AUTORZY!R:R,"*Opowieść*"),,,,,,
+🎭 Teatrzyk:,=COUNTIF(AUTORZY!R:R,"*Teatrzyk*"),,,,,,
+🧚 Bajka:,=COUNTIF(AUTORZY!R:R,"*Bajka*"),,,,,,
+✍️ Poezja:,=COUNTIF(AUTORZY!R:R,"*Poezja*"),,,,,,
+,,,,,,,
+📊 Łącznie skategoryzowane:,=SUM(B26:B30),,,,,,
