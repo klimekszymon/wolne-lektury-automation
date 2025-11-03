@@ -1,0 +1,741 @@
+{
+  "name": "wolne-lektury-automatyzacja-v2",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "b47e45be-58ef-480d-9b6f-68190827489b",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2432,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://wolnelektury.pl/api/authors/",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "page_size",
+              "value": "5"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "40c00af2-de39-4d2d-bee6-dc5f5dbe4f77",
+      "name": "Fetch WL Authors List",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2208,
+        448
+      ],
+      "notes": "Pobiera listę autorów z Wolnych Lektur. Zmień page_size na 100-500 dla pełnego importu."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse authors list - n8n already split into items\nconst items = $input.all();\nconsole.log(`Processing ${items.length} authors from WL API`);\n\nreturn items.map(item => ({\n  json: {\n    name: item.json.name,\n    slug: item.json.slug,\n    detailUrl: item.json.href,\n    catalogUrl: item.json.url\n  }\n}));"
+      },
+      "id": "92b00733-5b5b-4870-a7a1-2b18f3de8736",
+      "name": "Parse Authors List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1984,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.detailUrl }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "9286cfbb-d3e4-4105-9e72-c9584404d697",
+      "name": "Fetch Author Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1760,
+        448
+      ],
+      "notes": "N8N automatycznie wykonuje dla każdego autora!"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract death year from HTML description - PRESERVE ORIGINAL METADATA FOR AI BRANCH\nconst items = $input.all();  // get all incoming items\nconst results = [];\n\nconsole.log(`\\n=== PROCESSING ${items.length} AUTHORS (with original metadata preserved) ===`);\n\nfor (const item of items) {\n  const data = item.json;\n\n  // Preserve original metadata in a single property so it survives through AI node\n  const original = {\n    name: data.name || data.Autor || '',\n    slug: data.slug || data.WL_slug || '',\n    description: data.description || '',\n    catalogUrl: data.catalogUrl || data.WL_url || data.url || '',\n    birthYear: data.birthYear || null,\n    deathYear: data.deathYear || null,\n    extractionMethod: data.extractionMethod || null,\n    needsAI: data.needsAI || false\n  };\n\n  const name = original.name;\n  const description = original.description || '';\n\n  let deathYear = null;\n  let birthYear = original.birthYear || null;\n  let extractionMethod = 'none';\n\n  // METHOD 1: Structured HTML <dt>Zm.</dt>\n  const deathMatch = description.match(/<dt>Zm\\.<\\/dt>\\s*<dd>[^<]*?(\\d{4})/i);\n  if (deathMatch) {\n    deathYear = parseInt(deathMatch[1]);\n    extractionMethod = 'structured_html';\n  }\n\n  // METHOD 2: Regex patterns fallback\n  if (!deathYear) {\n    const patterns = [\n      /zm\\.?\\s*(\\d{1,2})\\s*\\w+\\s*(\\d{4})/i,\n      /zmarł.*?(\\d{4})/i,\n      /\\((\\d{4})\\s*[-–]\\s*(\\d{4})\\)/,\n      /ur\\..*?(\\d{4}).*?zm\\..*?(\\d{4})/i,\n      /zm\\.\\s*(\\d{4})/i,\n      /†\\s*(\\d{4})/,\n      /died.*?(\\d{4})/i\n    ];\n\n    for (const pattern of patterns) {\n      const match = description.match(pattern);\n      if (match) {\n        deathYear = parseInt(match[match.length - 1]);\n        extractionMethod = 'regex_pattern';\n        break;\n      }\n    }\n  }\n\n  // Extract birth year\n  const birthMatch = description.match(/<dt>Ur\\.<\\/dt>\\s*<dd>[^<]*?(\\d{4})/i);\n  if (birthMatch) {\n    birthYear = parseInt(birthMatch[1]);\n  }\n\n  // Validate death year\n  const currentYear = new Date().getFullYear();\n  if (deathYear && (deathYear < 1500 || deathYear > currentYear)) {\n    console.log(`⚠️ Invalid death year for ${name}: ${deathYear}`);\n    deathYear = null;\n    extractionMethod = 'invalid';\n  }\n\n  if (deathYear && birthYear && deathYear < birthYear) {\n    console.log(`⚠️ Death before birth for ${name}: ${birthYear}-${deathYear}`);\n    deathYear = null;\n    extractionMethod = 'invalid_order';\n  }\n\n  const needsAI = !deathYear && description.length > 100;\n\n  if (deathYear) {\n    console.log(`✓ ${name}: †${deathYear} (${extractionMethod})`);\n  } else if (needsAI) {\n    console.log(`? ${name}: Needs AI`);\n  } else {\n    console.log(`✗ ${name}: No data`);\n  }\n\n  // Always include 'original' object so downstream (AI) responses can be re-associated\n  results.push({\n    json: {\n      original,\n      name: original.name,\n      slug: original.slug,\n      deathYear,\n      birthYear,\n      extractionMethod,\n      needsAI,\n      description: description.substring(0, 1000),\n      descriptionLength: description.length,\n      catalogUrl: original.catalogUrl\n    }\n  });\n}\n\nconsole.log(`\\n=== EXTRACTION COMPLETE ===`);\nconsole.log(`Processed: ${results.length} authors`);\nconsole.log(`With death year: ${results.filter(r => r.json.deathYear).length}`);\nconsole.log(`Need AI: ${results.filter(r => r.json.needsAI).length}`);\n\nreturn results;"
+      },
+      "id": "129006d8-428d-42cc-ad71-378c232c1077",
+      "name": "Extract Death Year (Regex)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1552,
+        448
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "db2fd28b-6682-436e-a290-c127ca054f98",
+              "leftValue": "=={{ $json.needsAI === true }}",
+              "rightValue": "=true",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ee5a0d08-da2c-48d8-a972-63f8db0fa4b1",
+      "name": "Route: Needs AI?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1328,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "Wyciągnij TYLKO rok śmierci autora z poniższego tekstu biograficznego.\n\nAutor: {{ $json.original.name }}\n\nBiografia:\n{{ $json.description }}\n\nOdpowiedz TYLKO liczbą (rok śmierci) lub słowem \"UNKNOWN\" jeśli nie możesz znaleźć.\n\nPrzykłady poprawnych odpowiedzi:\n- 1849\n- 1953\n- UNKNOWN\n\nTwoja odpowiedź:"
+            }
+          ]
+        },
+        "options": {
+          "maxTokens": 20,
+          "temperature": 0.1
+        }
+      },
+      "id": "b0b63e94-e95a-4d32-9f2d-4ee4abb2008c",
+      "name": "AI: Extract Death Year",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.4,
+      "position": [
+        -1200,
+        288
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "D2daxxJGBlbkhf1p",
+          "name": "OpenAi account"
+        }
+      },
+      "notes": "Opcjonalne - wymaga OpenAI API key"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AI response - Robust: preserve/reconstruct author metadata\nconst items = $input.all();\nconst results = [];\n\nconsole.log(`\\n=== PARSING ${items.length} AI RESPONSES ===`);\n\nfor (const item of items) {\n  // AI node can return different shapes. Try common places for text:\n  const aiResponse = (\n    (item.json.message && (item.json.message.content || item.json.message)) ||\n    item.json.text ||\n    item.json.content ||\n    item.json.aiResponse ||\n    ''\n  );\n\n  const aiText = (typeof aiResponse === 'string') ? aiResponse.trim() : (aiResponse?.toString() || '').trim();\n\n  // Reconstruct metadata: prefer item.json.original, else fallback to fields on item.json (if upstream preserved), else try $input.all()[0] etc.\n  const meta = item.json.original || {\n    name: item.json.name || item.json.Autor || '',\n    slug: item.json.slug || item.json.WL_slug || '',\n    catalogUrl: item.json.catalogUrl || item.json.WL_url || item.json.url || '',\n    birthYear: item.json.birthYear || item.json.Rok_urodzenia || null,\n    deathYear: item.json.deathYear || item.json.Rok_smierci || null,\n    extractionMethod: item.json.extractionMethod || null,\n    description: item.json.description || ''\n  };\n\n  let deathYear = meta.deathYear;\n  let extractionMethod = meta.extractionMethod || null;\n  const name = meta.name || 'UNKNOWN';\n  const currentYear = new Date().getFullYear();\n\n  console.log(`Processing AI response for ${name}: \"${aiText}\"`);\n\n  const yearMatch = aiText.match(/\\d{4}/);\n  if (yearMatch) {\n    const aiYear = parseInt(yearMatch[0]);\n    if (aiYear >= 1500 && aiYear <= currentYear) {\n      deathYear = aiYear;\n      extractionMethod = 'openai';\n      console.log(`✓ AI extracted: ${aiYear} for ${name}`);\n    } else {\n      console.log(`⚠️ AI returned invalid year: ${aiYear} for ${name}`);\n    }\n  } else if (aiText.toUpperCase().includes('UNKNOWN')) {\n    extractionMethod = 'ai_unknown';\n    console.log(`✗ AI couldn't find death year for ${name}`);\n  } else {\n    console.log(`⚠️ Unexpected AI response for ${name}: \"${aiText}\"`);\n  }\n\n  results.push({\n    json: {\n      // keep original metadata fields on top-level so downstream nodes see consistent keys\n      Autor: meta.name || '',\n      name: meta.name || '',\n      slug: meta.slug || '',\n      WL_slug: meta.slug || '',\n      WL_url: meta.catalogUrl || '',\n      catalogUrl: meta.catalogUrl || '',\n      birthYear: meta.birthYear || '',\n      Rok_urodzenia: meta.birthYear || '',\n      deathYear,\n      Rok_smierci: deathYear || '',\n      extractionMethod,\n      aiResponse: aiText,\n      description: meta.description || '',\n      needsAI: item.json.needsAI || false\n    }\n  });\n}\n\nconsole.log(`\\n=== AI PARSING COMPLETE ===`);\nconsole.log(`Processed: ${results.length} items`);\nconsole.log(`Successfully extracted: ${results.filter(r => r.json.extractionMethod === 'openai').length}`);\n\nreturn results;"
+      },
+      "id": "62d63f29-2934-4bed-84e7-e17b7a63facb",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -816,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "mergeByFields": {
+          "values": [
+            {
+              "field1": "={{ $json.original.deathYear }}",
+              "field2": "={{ $json.deathYear }}"
+            }
+          ]
+        },
+        "joinMode": "keepEverything",
+        "options": {}
+      },
+      "id": "2a84be3f-3ebe-4616-a0d5-613b8630ae45",
+      "name": "Merge AI and Non-AI",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        -1008,
+        640
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter only public domain authors - produce consistent Polish fields\nconst currentYear = new Date().getFullYear();\nconst items = $input.all();\n\nconsole.log(`\\n=== FILTERING PUBLIC DOMAIN ===`);\nconsole.log(`Input items: ${items.length}`);\n\nconst results = [];\nconst rejected = [];\n\nfor (const item of items) {\n  // accept both shapes (from non-AI branch and AI branch)\n  const name = item.json.Autor || item.json.name || '';\n  const deathYear = item.json.Rok_smierci || item.json.deathYear || null;\n  const birthYear = item.json.Rok_urodzenia || item.json.birthYear || '';\n  const slug = item.json.WL_slug || item.json.slug || '';\n  const catalogUrl = item.json.WL_url || item.json.catalogUrl || '';\n  const extractionMethod = item.json.extractionMethod || item.json.extractionMethod || 'unknown';\n\n  if (!deathYear) {\n    rejected.push({ name, reason: 'No death year found' });\n    continue;\n  }\n\n  const yearsSinceDeath = currentYear - Number(deathYear);\n  const isPublicDomain = yearsSinceDeath > 70;\n\n  if (isPublicDomain) {\n    results.push({\n      json: {\n        Autor: name,\n        Rok_smierci: Number(deathYear),\n        Rok_urodzenia: birthYear || '',\n        Tlumacz: '',\n        Rok_smierci_tlumacza: '',\n        Zrodlo: `Wolne Lektury (${extractionMethod})`,\n        WL_url: catalogUrl || '',\n        WL_slug: slug || '',\n        Data_importu: new Date().toISOString().split('T')[0]\n      }\n    });\n    console.log(`✓ ${name} (†${deathYear}) - ${yearsSinceDeath} years since death`);\n  } else {\n    rejected.push({\n      name,\n      deathYear,\n      reason: `Protected - only ${yearsSinceDeath} years since death (need 70+)`\n    });\n    console.log(`✗ ${name} (†${deathYear}) - protected (${70 - yearsSinceDeath} years to public domain)`);\n  }\n}\n\nconsole.log(`\\n=== RESULTS ===`);\nconsole.log(`✓ Public domain: ${results.length}`);\nconsole.log(`✗ Rejected: ${rejected.length}`);\n\nif (rejected.length > 0) {\n  console.log(`\\nRejected authors:`);\n  rejected.forEach(r => console.log(`  - ${r.name}: ${r.reason}`));\n}\n\nif (results.length === 0) {\n  console.log(`\\n⚠️ WARNING: No public domain authors found!`);\n  return [{ json: { error: true, message: 'No authors passed filter' } }];\n}\n\nreturn results;"
+      },
+      "id": "47cbe960-a4a9-42a7-96fd-d59d9f4006b4",
+      "name": "Filter Public Domain (>70 years)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -256,
+        688
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "15unX5-UllmBGlsVHGEY6KuyEXbctevVrQQI_8HoCxDY",
+          "mode": "list",
+          "cachedResultName": "google_sheets_wolne-lektury-template",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/15unX5-UllmBGlsVHGEY6KuyEXbctevVrQQI_8HoCxDY/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 1070512326,
+          "mode": "list",
+          "cachedResultName": "AUTORZY",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/15unX5-UllmBGlsVHGEY6KuyEXbctevVrQQI_8HoCxDY/edit#gid=1070512326"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Autor"
+          ],
+          "schema": [
+            {
+              "id": "Autor",
+              "displayName": "Autor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "WL_slug",
+              "displayName": "WL_slug",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "WL_url",
+              "displayName": "WL_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Rok_urodzenia",
+              "displayName": "Rok_urodzenia",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Rok_smierci",
+              "displayName": "Rok_smierci",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Metoda_ekstrakcji",
+              "displayName": "Metoda_ekstrakcji",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Lat_od_smierci",
+              "displayName": "Lat_od_smierci",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Lat_do_domeny",
+              "displayName": "Lat_do_domeny",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status_prawny",
+              "displayName": "Status_prawny",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status_kolor",
+              "displayName": "Status_kolor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status_szczegoly",
+              "displayName": "Status_szczegoly",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Data_domeny_publicznej",
+              "displayName": "Data_domeny_publicznej",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Mozliwe_do_nagrania",
+              "displayName": "Mozliwe_do_nagrania",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Tlumacz",
+              "displayName": "Tlumacz",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Rok_smierci_tlumacza",
+              "displayName": "Rok_smierci_tlumacza",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Tlumaczenie_status",
+              "displayName": "Tlumaczenie_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Liczba_utworow",
+              "displayName": "Liczba_utworow",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Kategoria",
+              "displayName": "Kategoria",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Grupa_wiekowa",
+              "displayName": "Grupa_wiekowa",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Priorytet_nagrania",
+              "displayName": "Priorytet_nagrania",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Utwory_do_nagrania",
+              "displayName": "Utwory_do_nagrania",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Ostatnie_sprawdzenie",
+              "displayName": "Ostatnie_sprawdzenie",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Zrodlo_danych",
+              "displayName": "Zrodlo_danych",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Confidence",
+              "displayName": "Confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Notatki",
+              "displayName": "Notatki",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status_nagrania",
+              "displayName": "Status_nagrania",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Zrodlo",
+              "displayName": "Zrodlo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Komentarz",
+              "displayName": "Komentarz",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Status_AUTO",
+              "displayName": "Status_AUTO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Lista_utworow",
+              "displayName": "Lista_utworow",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Utwory_API_status",
+              "displayName": "Utwory_API_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false,
+          "matchColumns": [
+            "Autor"
+          ]
+        },
+        "options": {}
+      },
+      "id": "2f3b7403-d3ff-4bc9-9217-7344309193fb",
+      "name": "Upsert to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.4,
+      "position": [
+        -16,
+        448
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "2uFxWQEy8gV5n773",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Używa appendOrUpdate - automatycznie unika duplikatów!"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build summary\nconst items = $input.all();\nconst count = items.length;\n\nif (count === 0) {\n  return [{\n    json: {\n      message: '⚠️ No authors imported - all were duplicates or filtered out',\n      count: 0,\n      timestamp: new Date().toISOString()\n    }\n  }];\n}\n\n// Group by extraction method\nconst byMethod = {};\nitems.forEach(item => {\n  const source = item.json.Zrodlo || 'unknown';\n  const method = source.match(/\\(([^)]+)\\)/)?.[1] || 'unknown';\n  byMethod[method] = (byMethod[method] || 0) + 1;\n});\n\nconst methodStats = Object.entries(byMethod)\n  .map(([method, count]) => `  • ${method}: ${count}`)\n  .join('\\n');\n\n// Sample authors\nconst sampleAuthors = items\n  .slice(0, 10)\n  .map(i => `  • ${i.json.Autor} (†${i.json.Rok_smierci})`)\n  .join('\\n');\n\nconst message = `📚 **Wolne Lektury Import - COMPLETE** ✅\\n\\n` +\n                `**Zaimportowano:** ${count} autorów (domena publiczna)\\n` +\n                `**Data:** ${new Date().toLocaleString('pl-PL')}\\n\\n` +\n                `**Metody ekstrakcji:**\\n${methodStats}\\n\\n` +\n                `**Przykładowi autorzy:**\\n${sampleAuthors}` +\n                (count > 10 ? `\\n  ... i ${count - 10} więcej` : '') +\n                `\\n\\n🎉 Autorzy dodani do Google Sheet!`;\n\nconsole.log('\\n' + message);\n\nreturn [{\n  json: {\n    message,\n    count,\n    byMethod,\n    timestamp: new Date().toISOString(),\n    success: true\n  }\n}];"
+      },
+      "id": "13b7db03-0c31-4496-80fd-1dc668718d1e",
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        192,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// N8N NODE: Calculate Legal Status & Enhanced Metadata\n// WSTAW PO: \"Merge AI and Non-AI\"\n// PRZED: \"Filter Public Domain\"\n// ============================================\n\nconst items = $input.all();\nconst currentYear = new Date().getFullYear();\nconst results = [];\n\nconsole.log(`\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);\nconsole.log(`📊 CALCULATING LEGAL STATUS FOR ${items.length} AUTHORS`);\nconsole.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n`);\n\nlet domenaPubliczna = 0;\nlet chronione = 0;\nlet wymagaWeryfikacji = 0;\n\nfor (const item of items) {\n  // EXTRACT DATA\n  const autor = item.json.Autor || item.json.name || '';\n  const rokSmierci = parseInt(item.json.Rok_smierci || item.json.deathYear || 0);\n  const rokUrodzenia = parseInt(item.json.Rok_urodzenia || item.json.birthYear || 0);\n  const tlumacz = item.json.Tlumacz || '';\n  const rokSmierciTlumacza = parseInt(item.json.Rok_smierci_tlumacza || 0);\n  const slug = item.json.slug || item.json.WL_slug || '';\n  const url = item.json.WL_url || item.json.catalogUrl || item.json.url || '';\n  \n  // ========================================\n  // OBLICZENIA PODSTAWOWE\n  // ========================================\n  const latOdSmierci = rokSmierci ? currentYear - rokSmierci : null;\n  const latDoDomeny = latOdSmierci !== null ? 70 - latOdSmierci : null;\n  const dataDomenyPublicznej = rokSmierci ? rokSmierci + 70 : null;\n  \n  // ========================================\n  // STATUS PRAWNY - GŁÓWNA LOGIKA\n  // ========================================\n  let statusPrawny = '🔍 WYMAGA WERYFIKACJI';\n  let kolorStatus = 'gray';\n  let mozliweDoNagrania = false;\n  let szczegoly = '';\n  \n  if (latOdSmierci === null || rokSmierci === 0) {\n    // BRAK DANYCH\n    statusPrawny = '❓ BRAK DANYCH O ŚMIERCI';\n    kolorStatus = 'gray';\n    szczegoly = 'Nie udało się ustalić roku śmierci autora';\n    wymagaWeryfikacji++;\n    \n  } else if (latOdSmierci >= 70) {\n    // AUTOR W DOMENIE PUBLICZNEJ\n    \n    if (tlumacz && rokSmierciTlumacza) {\n      // MA TŁUMACZA - sprawdź obie daty\n      const latOdSmierciTlumacza = currentYear - rokSmierciTlumacza;\n      \n      if (latOdSmierciTlumacza >= 70) {\n        statusPrawny = '✅ DOMENA PUBLICZNA';\n        kolorStatus = 'green';\n        mozliweDoNagrania = true;\n        szczegoly = `Autor: ${latOdSmierci} lat, Tłumacz: ${latOdSmierciTlumacza} lat - OBA w domenie`;\n        domenaPubliczna++;\n      } else {\n        const zostaloLatTlumacz = 70 - latOdSmierciTlumacza;\n        statusPrawny = `⚠️ CHRONIONE (tłumacz)`;\n        kolorStatus = 'orange';\n        szczegoly = `Autor w domenie, ale tłumacz chroniony jeszcze ${zostaloLatTlumacz} lat (do ${rokSmierciTlumacza + 70})`;\n        chronione++;\n      }\n    } else if (tlumacz && !rokSmierciTlumacza) {\n      // JEST TŁUMACZ ALE NIE ZNAMY DATY\n      statusPrawny = '⚠️ WYMAGA SPRAWDZENIA TŁUMACZA';\n      kolorStatus = 'orange';\n      szczegoly = `Autor w domenie (${latOdSmierci} lat), ale tłumacz: ${tlumacz} - wymaga weryfikacji`;\n      wymagaWeryfikacji++;\n    } else {\n      // ORYGINAŁ POLSKI - JASNA DOMENA PUBLICZNA\n      statusPrawny = '✅ DOMENA PUBLICZNA';\n      kolorStatus = 'green';\n      mozliweDoNagrania = true;\n      szczegoly = `Minęło ${latOdSmierci} lat od śmierci - oryginał polski`;\n      domenaPubliczna++;\n    }\n    \n  } else {\n    // AUTOR CHRONIONY\n    const zostaloLat = Math.abs(latDoDomeny);\n    const rokDomeny = dataDomenyPublicznej;\n    statusPrawny = `❌ CHRONIONE (autor)`;\n    kolorStatus = 'red';\n    szczegoly = `Minęło ${latOdSmierci} lat, brakuje jeszcze ${zostaloLat} lat (do roku ${rokDomeny})`;\n    chronione++;\n  }\n  \n  // ========================================\n  // QUALITY & CONFIDENCE\n  // ========================================\n  const metodaEkstrakcji = item.json.extractionMethod || item.json.Metoda_ekstrakcji || 'unknown';\n  let confidence = 'medium';\n  let confidencePercent = 50;\n  \n  if (metodaEkstrakcji === 'structured_html') {\n    confidence = 'very_high';\n    confidencePercent = 95;\n  } else if (metodaEkstrakcji === 'openai') {\n    confidence = 'high';\n    confidencePercent = 85;\n  } else if (metodaEkstrakcji === 'regex_pattern') {\n    confidence = 'medium';\n    confidencePercent = 70;\n  } else if (metodaEkstrakcji === 'manual') {\n    confidence = 'very_high';\n    confidencePercent = 100;\n  } else {\n    confidence = 'low';\n    confidencePercent = 30;\n  }\n  \n  // ========================================\n  // KATEGORIA (SMART DETECTION)\n  // ========================================\n  let kategoria = '';\n  let kategoriaIcon = '';\n  const autorLower = autor.toLowerCase();\n  \n  if (autorLower.includes('tuwim')) {\n    kategoria = 'Wiersz';\n    kategoriaIcon = '📝';\n  } else if (autorLower.includes('makuszyński')) {\n    kategoria = 'Opowieść';\n    kategoriaIcon = '📖';\n  } else if (autorLower.includes('gałczyński')) {\n    kategoria = 'Teatrzyk';\n    kategoriaIcon = '🎭';\n  } else if (autorLower.includes('brzechwa')) {\n    kategoria = 'Wiersz';\n    kategoriaIcon = '📝';\n  } else if (autorLower.includes('konopnicka')) {\n    kategoria = 'Bajka';\n    kategoriaIcon = '🧚';\n  } else if (autorLower.includes('mickiewicz') || autorLower.includes('słowacki')) {\n    kategoria = 'Poezja';\n    kategoriaIcon = '✍️';\n  } else {\n    // będzie wypełnione ręcznie\n    kategoria = '';\n    kategoriaIcon = '';\n  }\n  \n  // ========================================\n  // GRUPA WIEKOWA (na podstawie kategorii)\n  // ========================================\n  const categoryToAgeGroup = {\n    'Wiersz': '2-8 lat',\n    'Bajka': '3-10 lat',\n    'Opowieść': '6-12 lat',\n    'Legenda': '5-12 lat',\n    'Teatrzyk': '4-9 lat',\n    'Poezja': '8-12 lat'\n  };\n  \n  const grupaWiekowa = categoryToAgeGroup[kategoria] || '';\n  \n  // ========================================\n  // PRIORYTET (AUTO-SCORING)\n  // ========================================\n  let priorityScore = 0;\n  \n  // Domena publiczna = automatycznie +2 gwiazdki\n  if (mozliweDoNagrania) {\n    priorityScore += 2;\n  }\n  \n  // Znani autorzy = +1 gwiazdka\n  const famousAuthors = ['tuwim', 'makuszyński', 'brzechwa', 'gałczyński', 'konopnicka', 'krasicki', 'jachowicz'];\n  if (famousAuthors.some(a => autorLower.includes(a))) {\n    priorityScore += 1;\n  }\n  \n  // Dla dzieci (kategoria) = +1 gwiazdka\n  if (['Wiersz', 'Bajka', 'Teatrzyk'].includes(kategoria)) {\n    priorityScore += 1;\n  }\n  \n  const stars = Math.min(priorityScore, 5);\n  const priorytetNagrania = stars > 0 ? '⭐'.repeat(stars) : '';\n  \n  // ========================================\n  // BUILD ENHANCED RESULT\n  // ========================================\n  const result = {\n    // ════════════════════════════════════\n    // PODSTAWOWE DANE (6 kolumn)\n    // ════════════════════════════════════\n    Autor: autor,\n    WL_slug: slug,\n    WL_url: url,\n    Rok_urodzenia: rokUrodzenia || '',\n    Rok_smierci: rokSmierci || '',\n    Metoda_ekstrakcji: metodaEkstrakcji,\n    \n    // ════════════════════════════════════\n    // STATUS PRAWNY (6 kolumn) ⭐ GŁÓWNE\n    // ════════════════════════════════════\n    Lat_od_smierci: latOdSmierci !== null ? latOdSmierci : '',\n    Lat_do_domeny: latDoDomeny !== null ? latDoDomeny : '',\n    Status_prawny: statusPrawny,\n    Status_kolor: kolorStatus,\n    Status_szczegoly: szczegoly,\n    Data_domeny_publicznej: dataDomenyPublicznej || '',\n    Mozliwe_do_nagrania: mozliweDoNagrania ? 'TAK ✅' : 'NIE ❌',\n    \n    // ════════════════════════════════════\n    // TŁUMACZENIA (3 kolumny)\n    // ════════════════════════════════════\n    Tlumacz: tlumacz,\n    Rok_smierci_tlumacza: rokSmierciTlumacza || '',\n    Tlumaczenie_status: tlumacz \n      ? (rokSmierciTlumacza ? `Tłumacz: ${rokSmierciTlumacza}` : '⚠️ Wymaga sprawdzenia') \n      : '✅ Oryginał polski',\n    \n    // ════════════════════════════════════\n    // CONTENT METADATA (5 kolumn) ⭐ NOWE\n    // ════════════════════════════════════\n    Liczba_utworow: '', // TODO: będzie z kolejnego node'a\n    Kategoria: kategoria ? `${kategoriaIcon} ${kategoria}` : '',\n    Grupa_wiekowa: grupaWiekowa,\n    Priorytet_nagrania: priorytetNagrania,\n    Utwory_do_nagrania: '', // do ręcznego wypełnienia\n    \n    // ════════════════════════════════════\n    // QUALITY & TRACKING (5 kolumn)\n    // ════════════════════════════════════\n    Ostatnie_sprawdzenie: new Date().toISOString().split('T')[0],\n    Zrodlo_danych: `WL API (${metodaEkstrakcji})`,\n    Confidence: `${confidence} (${confidencePercent}%)`,\n    Notatki: '',\n    Status_nagrania: mozliweDoNagrania ? '📝 Do nagrania' : '⏸️ Wstrzymane (prawnie)',\n    \n    // ════════════════════════════════════\n    // LEGACY FIELDS (dla kompatybilności)\n    // ════════════════════════════════════\n    Zrodlo: `WL API (${metodaEkstrakcji})`,\n    Komentarz: szczegoly,\n    Status_AUTO: statusPrawny\n  };\n  \n  // LOG PROGRESS\n  const icon = mozliweDoNagrania ? '✅' : (kolorStatus === 'red' ? '❌' : '⚠️');\n  console.log(`${icon} ${autor.padEnd(30)} | ${statusPrawny.padEnd(35)} | ${latOdSmierci !== null ? latOdSmierci + ' lat' : 'brak danych'}`);\n  \n  results.push({\n    json: result\n  });\n}\n\n// ========================================\n// PODSUMOWANIE\n// ========================================\nconsole.log(`\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);\nconsole.log(`✅ LEGAL STATUS CALCULATION COMPLETE`);\nconsole.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);\nconsole.log(`📊 Łącznie przetworzono:     ${results.length} autorów`);\nconsole.log(`✅ Domena publiczna:         ${domenaPubliczna} (${Math.round(domenaPubliczna/results.length*100)}%)`);\nconsole.log(`❌ Chronione:                ${chronione} (${Math.round(chronione/results.length*100)}%)`);\nconsole.log(`⚠️ Wymaga weryfikacji:       ${wymagaWeryfikacji} (${Math.round(wymagaWeryfikacji/results.length*100)}%)`);\nconsole.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n`);\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -800,
+        640
+      ],
+      "id": "00b08386-7b60-4c0f-8e6c-41f5368643f6",
+      "name": "Calculate Legal Status & Metadata"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================\n// N8N NODE: Fetch Works Count from Wolne Lektury API\n// WSTAW PO: \"Calculate Legal Status\"\n// PRZED: \"Upsert to Google Sheet\"\n// ============================================\n// UWAGA: Ten node działa TYLKO dla autorów którzy są możliwi do nagrania\n// Oszczędza API calls dla autorów chronionych\n// ============================================\n\nconst items = $input.all();\nconst results = [];\n\nconsole.log(`\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);\nconsole.log(`📚 FETCHING WORKS COUNT FROM WL API`);\nconsole.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n`);\n\n// Counter dla statystyk\nlet successCount = 0;\nlet errorCount = 0;\nlet skippedCount = 0;\n\nfor (const item of items) {\n  const autor = item.json.Autor || '';\n  const slug = item.json.WL_slug || '';\n  const url = item.json.WL_url || '';\n  const mozliweDoNagrania = item.json.Mozliwe_do_nagrania;\n  \n  // SKIP jeśli nie można nagrać (oszczędzamy API calls)\n  if (mozliweDoNagrania !== 'TAK ✅') {\n    console.log(`⏭️ SKIP: ${autor.padEnd(30)} | Nie można nagrać`);\n    skippedCount++;\n    \n    results.push({\n      json: {\n        ...item.json,\n        Liczba_utworow: '',\n        Lista_utworow: '',\n        Utwory_API_status: 'Pominięto (chronione)'\n      }\n    });\n    continue;\n  }\n  \n  // BUILD API URL\n  // WL API format: https://wolnelektury.pl/api/authors/julian-tuwim/\n  let apiUrl = '';\n  \n  if (slug) {\n    apiUrl = `https://wolnelektury.pl/api/authors/${slug}/`;\n  } else if (url) {\n    // Convert profile URL to API URL\n    apiUrl = url.replace('/autor/', '/api/authors/') + '/';\n  } else {\n    console.log(`⚠️ WARN: ${autor.padEnd(30)} | Brak slug/URL`);\n    results.push({\n      json: {\n        ...item.json,\n        Liczba_utworow: '',\n        Lista_utworow: '',\n        Utwory_API_status: 'Brak URL'\n      }\n    });\n    errorCount++;\n    continue;\n  }\n  \n  // FETCH FROM API\n  try {\n    const response = await fetch(apiUrl, {\n      headers: {\n        'Accept': 'application/json'\n      }\n    });\n    \n    if (!response.ok) {\n      throw new Error(`HTTP ${response.status}`);\n    }\n    \n    const data = await response.json();\n    \n    // EXTRACT WORKS\n    const books = data.books || [];\n    const worksCount = books.length;\n    \n    // Build lista utworów (pierwsze 5 + ...)\n    let worksList = '';\n    if (worksCount > 0) {\n      const first5 = books.slice(0, 5).map(b => b.title).join(', ');\n      worksList = worksCount > 5 \n        ? `${first5} ... i ${worksCount - 5} więcej`\n        : first5;\n    }\n    \n    // PRIORYTET BOOST na podstawie liczby utworów\n    let priorytetBonus = '';\n    if (worksCount > 30) {\n      priorytetBonus = ' (⭐ BARDZO PRODUKTYWNY!)';\n    } else if (worksCount > 15) {\n      priorytetBonus = ' (⭐ Dużo utworów)';\n    } else if (worksCount < 3) {\n      priorytetBonus = ' (⚠️ Mało utworów)';\n    }\n    \n    console.log(`✅ ${autor.padEnd(30)} | ${worksCount} utworów${priorytetBonus}`);\n    successCount++;\n    \n    results.push({\n      json: {\n        ...item.json,\n        Liczba_utworow: worksCount,\n        Lista_utworow: worksList,\n        Utwory_API_status: 'Pobrano z WL API'\n      }\n    });\n    \n  } catch (error) {\n    console.log(`❌ ERROR: ${autor.padEnd(30)} | ${error.message}`);\n    errorCount++;\n    \n    results.push({\n      json: {\n        ...item.json,\n        Liczba_utworow: '',\n        Lista_utworow: '',\n        Utwory_API_status: `Błąd API: ${error.message}`\n      }\n    });\n  }\n  \n  // Rate limiting - czekaj 100ms między requestami\n  await new Promise(resolve => setTimeout(resolve, 100));\n}\n\n// ========================================\n// PODSUMOWANIE\n// ========================================\nconsole.log(`\\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);\nconsole.log(`✅ WORKS COUNT FETCH COMPLETE`);\nconsole.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);\nconsole.log(`📊 Łącznie:          ${results.length} autorów`);\nconsole.log(`✅ Sukces:           ${successCount}`);\nconsole.log(`⏭️ Pominięto:        ${skippedCount} (chronione)`);\nconsole.log(`❌ Błędy:            ${errorCount}`);\nconsole.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\\n`);\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -592,
+        640
+      ],
+      "id": "b8081f43-dfc2-4c7b-bd27-9e56bf0d77bd",
+      "name": "Fetch Works Count"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch WL Authors List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch WL Authors List": {
+      "main": [
+        [
+          {
+            "node": "Parse Authors List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Authors List": {
+      "main": [
+        [
+          {
+            "node": "Fetch Author Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Author Details": {
+      "main": [
+        [
+          {
+            "node": "Extract Death Year (Regex)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Death Year (Regex)": {
+      "main": [
+        [
+          {
+            "node": "Route: Needs AI?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: Needs AI?": {
+      "main": [
+        [
+          {
+            "node": "AI: Extract Death Year",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge AI and Non-AI",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "AI: Extract Death Year": {
+      "main": [
+        [
+          {
+            "node": "Parse AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse AI Response": {
+      "main": [
+        [
+          {
+            "node": "Merge AI and Non-AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge AI and Non-AI": {
+      "main": [
+        [
+          {
+            "node": "Calculate Legal Status & Metadata",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Public Domain (>70 years)": {
+      "main": [
+        []
+      ]
+    },
+    "Upsert to Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Build Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Legal Status & Metadata": {
+      "main": [
+        [
+          {
+            "node": "Fetch Works Count",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Works Count": {
+      "main": [
+        [
+          {
+            "node": "Upsert to Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "53cc04e8-e6d7-4908-b13d-1771565e9ebc",
+  "meta": {
+    "instanceId": "1706d7bc0db6ffcce50f5398cde37175c78fc7c34eef095b7fbbc7db14473a06"
+  },
+  "id": "ayNB3qqnhft12Tpo",
+  "tags": [
+    {
+      "updatedAt": "2025-10-31T23:11:04.445Z",
+      "createdAt": "2025-10-31T23:11:04.445Z",
+      "id": "TAuLCpqJevdkcIVm",
+      "name": "sheet"
+    }
+  ]
+}
